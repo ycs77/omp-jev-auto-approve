@@ -2,7 +2,23 @@
   "name": "omp-jev-auto-approve",
   "version": "0.1.0",
   "description": "Use Jev to review and approve OMP tool calls",
+  "keywords": [
+    "agent",
+    "agentic",
+    "ai",
+    "auto-approve",
+    "auto-approval",
+    "jev",
+    "omp",
+    "oh-my-pi",
+    "typesafe"
+  ],
+  "homepage": "https://github.com/ycs77/omp-jev-auto-approve",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ycs77/omp-jev-auto-approve.git"
+  },
   "author": {
     "name": "Lucas Yang",
     "email": "yangchenshin77@gmail.com"
