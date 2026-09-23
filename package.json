@@ -1,6 +1,6 @@
 {
   "name": "omp-jev-auto-approve",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Use Jev to review and approve OMP tool calls",
   "keywords": [
     "ai",
