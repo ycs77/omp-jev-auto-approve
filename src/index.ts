@@ -95,10 +95,12 @@ export default function (pi: ExtensionAPI) {
     client = null
 
     if (!process.env.TYPESAFE_API_KEY?.trim()) {
-      ctx.ui.notify(
-        '[omp-jev-auto-approve] Missing TYPESAFE_API_KEY, please visit https://console.typesafe.ai/keys to create and set it.',
-        'error',
-      )
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          '[omp-jev-auto-approve] Missing TYPESAFE_API_KEY, please visit https://console.typesafe.ai/keys to create and set it.',
+          'error',
+        )
+      }
       return
     }
 
@@ -153,10 +155,15 @@ export default function (pi: ExtensionAPI) {
       })
       const commandSafety = response.answers.command_safety
 
-      ctx.ui.notify(
-        `[omp-jev-auto-approve] choice: "${commandSafety.choice}", confidence: ${commandSafety.confidence}`,
-        'info',
-      )
+      if (
+        ctx.hasUI &&
+        (commandSafety.choice !== 'safe' || commandSafety.confidence < SAFE_CONFIDENCE_THRESHOLD)
+      ) {
+        ctx.ui.notify(
+          `[omp-jev-auto-approve] ${commandSafety.choice}, confidence=${commandSafety.confidence.toFixed(2)}`,
+          'warning',
+        )
+      }
 
       return enforce(tool, decisionFromSafety(commandSafety), ctx, event.toolCallId, pi.events)
     } catch {

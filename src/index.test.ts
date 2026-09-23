@@ -63,7 +63,7 @@ describe('bash tool approval workflow', () => {
         answers: { command_safety: { choice: 'dangerous', confidence: 1 } },
       }
     }) as unknown as typeof TypeSafeClient.prototype.systemOne
-    const { ctx, start, toolCall } = registerExtension()
+    const { ctx, notifications, start, toolCall } = registerExtension()
 
     await start({}, ctx)
 
@@ -77,6 +77,28 @@ describe('bash tool approval workflow', () => {
       block: true,
       reason: 'Permission denied: unsafe command.',
     })
+    expect(notifications).toContainEqual({
+      message: '[omp-jev-auto-approve] dangerous, confidence=1.00',
+      level: 'warning',
+    })
+  })
+
+  test('does not notify for a high-confidence safe assessment', async () => {
+    process.env.TYPESAFE_API_KEY = 'test-key'
+    TypeSafeClient.prototype.systemOne = (async () => ({
+      answers: { command_safety: { choice: 'safe', confidence: 0.9 } },
+    })) as unknown as typeof TypeSafeClient.prototype.systemOne
+    const { ctx, notifications, start, toolCall } = registerExtension()
+
+    await start({}, ctx)
+
+    const result = await toolCall(
+      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
+      ctx,
+    )
+
+    expect(result).toBeUndefined()
+    expect(notifications).toEqual([])
   })
 
   test('resets a previous client when a new session lacks an API key', async () => {
@@ -106,7 +128,7 @@ describe('bash tool approval workflow', () => {
     TypeSafeClient.prototype.systemOne = (async () => ({
       answers: { command_safety: { choice: 'safe', confidence: 0.89 } },
     })) as unknown as typeof TypeSafeClient.prototype.systemOne
-    const { ctx, start, toolCall } = registerExtension()
+    const { ctx, notifications, start, toolCall } = registerExtension()
 
     await start({}, ctx)
 
@@ -118,6 +140,10 @@ describe('bash tool approval workflow', () => {
     expect(result).toEqual({
       block: true,
       reason: 'Permission denied: low confidence safety assessment.',
+    })
+    expect(notifications).toContainEqual({
+      message: '[omp-jev-auto-approve] safe, confidence=0.89',
+      level: 'warning',
     })
   })
 
