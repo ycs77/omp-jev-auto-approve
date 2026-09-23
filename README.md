@@ -2,6 +2,9 @@
 
 An [Oh My Pi (OMP)](https://omp.sh/) extension that uses [TypeSafe's Jev](https://typesafe.ai/) model to review and automatically approve tool calls before they run.
 
+> [!WARNING]
+> This extension relies on an external AI model to assess Bash commands. Its assessments may be incorrect, incomplete, or unavailable, and an automatic approval does not guarantee that a command is safe. You are solely responsible for reviewing its use in your environment and accepting any consequences of approved commands being executed.
+
 ## Installation
 
 Install the extension for OMP:
