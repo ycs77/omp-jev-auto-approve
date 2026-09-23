@@ -10,7 +10,7 @@ An [Oh My Pi (OMP)](https://omp.sh/) extension that uses [TypeSafe's Jev](https:
 Install the extension for OMP:
 
 ```bash
-omp install github:ycs77/omp-jev-auto-approve
+omp install omp-jev-auto-approve
 ```
 
 Create an API key in the [TypeSafe Console](https://console.typesafe.ai/keys), then add it to your shell startup file, such as `~/.bashrc` or `~/.zshrc`, before starting OMP:
