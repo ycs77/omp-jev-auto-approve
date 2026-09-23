@@ -15,7 +15,7 @@
     "lint": "oxlint",
     "fmt": "oxfmt",
     "typecheck": "tsc --noEmit",
-    "check": "bun lint && bun fmt --check && bun typecheck"
+    "check": "bun lint && bun fmt --check && bun typecheck && bun test"
   },
   "dependencies": {
     "@typesafe-ai/sdk": "^0.6.0"
