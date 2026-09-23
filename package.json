@@ -8,14 +8,16 @@
     "email": "yangchenshin77@gmail.com"
   },
   "files": [
-    "src"
+    "src/index.ts"
   ],
   "type": "module",
   "scripts": {
     "lint": "oxlint",
     "fmt": "oxfmt",
     "typecheck": "tsc --noEmit",
-    "check": "bun lint && bun fmt --check && bun typecheck && bun test"
+    "check": "bun lint && bun fmt --check && bun typecheck && bun test",
+    "update-actions": "actionspack update",
+    "release": "bumpp --commit \"Release v%s\""
   },
   "dependencies": {
     "@typesafe-ai/sdk": "^0.6.0"
@@ -23,6 +25,8 @@
   "devDependencies": {
     "@oh-my-pi/pi-coding-agent": "^18.0.0",
     "@types/bun": "^1.4.2",
+    "actionspack": "^0.1.5",
+    "bumpp": "^12.3.0",
     "oxfmt": "^0.68.0",
     "oxlint": "^1.83.0",
     "oxlint-tsgolint": "^7.0.2002",
