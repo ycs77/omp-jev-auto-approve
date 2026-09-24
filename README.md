@@ -17,7 +17,7 @@ Create an API key in the [TypeSafe Console](https://console.typesafe.ai/keys), t
 
 ## Approval policy
 
-- `bash`: review the command and working directory.
+- `bash`: review the command and working directory. Also considers `allow` rules in OMP's `bash.patterns`.
 - `read` / `write` / `edit`: review local paths only, not file contents or patches. Protocol targets such as `xd://` and `skill://` are skipped.
 - `eval`: review the language, code, and working directory. Code is sent to TypeSafe; do not include secrets.
 - `safe` assessments with confidence at least `0.9` are auto-approved; `dangerous` assessments are denied. `uncertain` or lower-confidence results require manual approval.

@@ -4,7 +4,7 @@ import extension from './index.js'
 
 const { mockJudge, mockFindScopedSettings } = vi.hoisted(() => ({
   mockJudge: vi.fn(),
-  mockFindScopedSettings: vi.fn(() => ({}) as never),
+  mockFindScopedSettings: vi.fn(() => ({ get: () => [] }) as never),
 }))
 
 vi.mock('@oh-my-pi/pi-coding-agent/config/settings', () => ({
@@ -58,11 +58,11 @@ function registerExtension() {
 afterEach(() => {
   mockJudge.mockReset()
   mockFindScopedSettings.mockReset()
-  mockFindScopedSettings.mockReturnValue({} as never)
+  mockFindScopedSettings.mockReturnValue({ get: () => [] } as never)
 })
 
 describe('bash tool approval workflow', () => {
-  test('delegates every valid Bash command to Jev', async () => {
+  test('delegates Bash commands without a matching allow rule to Jev', async () => {
     let requestedCommand: string | undefined
     mockJudge.mockImplementation(async (request: { state: { command: string } }) => {
       requestedCommand = request.state.command
@@ -87,6 +87,64 @@ describe('bash tool approval workflow', () => {
       message: '[omp-jev-auto-approve] dangerous, confidence=1.00',
       level: 'warning',
     })
+  })
+
+  test('skips Jev for an exact Bash allow pattern', async () => {
+    mockFindScopedSettings.mockReturnValue({
+      get: () => [{ match: 'git status', approval: 'allow' }],
+    } as never)
+    const { ctx, notifications, toolCall } = registerExtension()
+
+    const result = await toolCall(
+      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
+      ctx,
+    )
+
+    expect(result).toBeUndefined()
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(notifications).toEqual([])
+  })
+
+  test('skips Jev for a matching wildcard allow even when other rules are restrictive', async () => {
+    mockFindScopedSettings.mockReturnValue({
+      get: () => [
+        { match: 'git status*', approval: 'deny' },
+        { match: 'git * --short', approval: 'allow' },
+      ],
+    } as never)
+    const { ctx, toolCall } = registerExtension()
+
+    const result = await toolCall(
+      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status --short' } },
+      ctx,
+    )
+
+    expect(result).toBeUndefined()
+    expect(mockJudge).not.toHaveBeenCalled()
+  })
+
+  test('keeps unmatched, restrictive, and regex-like rules on the Jev path', async () => {
+    mockFindScopedSettings.mockReturnValue({
+      get: () => [
+        { match: 'git status', approval: 'prompt' },
+        { match: 'git log', approval: 'deny' },
+        { match: 'git show a.b', approval: 'allow' },
+        { match: 'git diff*', approval: 'allow' },
+      ],
+    } as never)
+    mockJudge.mockResolvedValue({
+      answers: { operation_safety: { choice: 'dangerous', confidence: 1 } },
+    })
+    const { ctx, toolCall } = registerExtension()
+
+    for (const command of ['git status', 'git log', 'git show axb', 'git log --oneline']) {
+      const result = await toolCall(
+        { toolName: 'bash', toolCallId: command, input: { command } },
+        ctx,
+      )
+      expect(result).toEqual({ block: true, reason: 'Permission denied: unsafe command.' })
+    }
+    expect(mockJudge).toHaveBeenCalledTimes(4)
   })
 
   test('does not notify for a high-confidence safe assessment', async () => {

@@ -97,6 +97,40 @@ function decisionFromSafety(result: SafetyAssessment, tool: string): Decision {
   }
 }
 
+function matchesAllowedBashPattern(command: string, patterns: unknown): boolean {
+  if (!Array.isArray(patterns)) return false
+
+  const normalizedCommand = command.trim().replace(/\s+/gu, ' ')
+  if (!normalizedCommand) return false
+
+  for (const rule of patterns as unknown[]) {
+    if (
+      typeof rule !== 'object' ||
+      rule === null ||
+      Array.isArray(rule) ||
+      !('match' in rule) ||
+      !('approval' in rule) ||
+      typeof rule.match !== 'string' ||
+      typeof rule.approval !== 'string' ||
+      rule.approval.trim().toLowerCase() !== 'allow'
+    ) {
+      continue
+    }
+
+    const match = rule.match.trim().replace(/\s+/gu, ' ')
+    if (!match) continue
+    if (match === normalizedCommand) return true
+    if (!match.includes('*')) continue
+
+    const escaped = match
+      .split('*')
+      .map(part => part.replace(/[\\^$+?.()|[\]{}]/gu, '\\$&'))
+      .join('.*')
+    if (new RegExp(`^${escaped}$`, 'u').test(normalizedCommand)) return true
+  }
+  return false
+}
+
 interface PermissionRequestEvent {
   sessionId: string
   toolCallId: string
@@ -154,6 +188,8 @@ export default function (pi: ExtensionAPI) {
       )
     }
 
+    const settings = findScopedSettings(ctx.cwd)
+
     let state: Record<string, string | string[]>
     let question: string
     let criteria: { safe: string; dangerous: string; uncertain: string }
@@ -168,6 +204,8 @@ export default function (pi: ExtensionAPI) {
           pi.events,
         )
       }
+      if (matchesAllowedBashPattern(input.command, settings?.get('bash.patterns'))) return
+
       state = { command: input.command, working_directory: input.cwd ?? ctx.cwd }
       question = 'Using `command` and `working_directory`, determine the command safety level.'
       criteria = {
@@ -226,7 +264,6 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    const settings = findScopedSettings(ctx.cwd)
     const model = ctx.models.resolve('@judge')
     if (!settings || !model) {
       if (ctx.hasUI)
