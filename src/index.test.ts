@@ -1,13 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
-import { afterEach, describe, expect, test } from 'bun:test'
-import { TypeSafeClient } from '@typesafe-ai/sdk'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import extension from './index.js'
 
-const originalApiKey = process.env.TYPESAFE_API_KEY
-const originalSystemOneDescriptor = Object.getOwnPropertyDescriptor(
-  TypeSafeClient.prototype,
-  'systemOne',
-)!
+const { mockSystemOne } = vi.hoisted(() => ({ mockSystemOne: vi.fn() }))
+
+vi.mock('@typesafe-ai/sdk', async importOriginal => ({
+  ...(await importOriginal()),
+  TypeSafeClient: class {
+    systemOne = mockSystemOne
+  },
+}))
 
 function registerExtension() {
   const handlers: Record<string, (event: unknown, ctx: ExtensionContext) => Promise<unknown>> = {}
@@ -42,27 +44,25 @@ function registerExtension() {
   }
 }
 
-afterEach(() => {
-  Object.defineProperty(TypeSafeClient.prototype, 'systemOne', originalSystemOneDescriptor)
+beforeEach(() => {
+  vi.stubEnv('TYPESAFE_API_KEY', 'test-key')
+})
 
-  if (originalApiKey === undefined) {
-    delete process.env.TYPESAFE_API_KEY
-  } else {
-    process.env.TYPESAFE_API_KEY = originalApiKey
-  }
+afterEach(() => {
+  mockSystemOne.mockReset()
+  vi.unstubAllEnvs()
 })
 
 describe('bash tool approval workflow', () => {
   test('delegates every valid Bash command to Jev', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
     let requestedCommand: string | undefined
-    TypeSafeClient.prototype.systemOne = (async (request: { state: { command: string } }) => {
+    mockSystemOne.mockImplementation(async (request: { state: { command: string } }) => {
       requestedCommand = request.state.command
 
       return {
         answers: { operation_safety: { choice: 'dangerous', confidence: 1 } },
       }
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, notifications, start, toolCall } = registerExtension()
 
     await start({}, ctx)
@@ -84,10 +84,9 @@ describe('bash tool approval workflow', () => {
   })
 
   test('does not notify for a high-confidence safe assessment', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
-    TypeSafeClient.prototype.systemOne = (async () => ({
+    mockSystemOne.mockResolvedValue({
       answers: { operation_safety: { choice: 'safe', confidence: 0.9 } },
-    })) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, notifications, start, toolCall } = registerExtension()
 
     await start({}, ctx)
@@ -102,14 +101,11 @@ describe('bash tool approval workflow', () => {
   })
 
   test('resets a previous client when a new session lacks an API key', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
-    TypeSafeClient.prototype.systemOne = (async () => {
-      throw new Error('stale client was used')
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    mockSystemOne.mockRejectedValue(new Error('stale client was used'))
     const { ctx, start, toolCall } = registerExtension()
 
     await start({}, ctx)
-    delete process.env.TYPESAFE_API_KEY
+    vi.stubEnv('TYPESAFE_API_KEY', undefined)
     await start({}, ctx)
 
     const result = await toolCall(
@@ -124,10 +120,9 @@ describe('bash tool approval workflow', () => {
   })
 
   test('prompts rather than auto-approving a low-confidence safe assessment', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
-    TypeSafeClient.prototype.systemOne = (async () => ({
+    mockSystemOne.mockResolvedValue({
       answers: { operation_safety: { choice: 'safe', confidence: 0.89 } },
-    })) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, notifications, start, toolCall } = registerExtension()
 
     await start({}, ctx)
@@ -148,10 +143,7 @@ describe('bash tool approval workflow', () => {
   })
 
   test('prompts when the TypeSafe API fails', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
-    TypeSafeClient.prototype.systemOne = (async () => {
-      throw new Error('service unavailable')
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    mockSystemOne.mockRejectedValue(new Error('service unavailable'))
     const { ctx, notifications, start, toolCall } = registerExtension()
 
     await start({}, ctx)
@@ -174,12 +166,11 @@ describe('bash tool approval workflow', () => {
 
 describe('path and eval approval workflow', () => {
   test('reviews a read path without reading file contents', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
     let state: unknown
-    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, start, toolCall } = registerExtension()
     await start({}, ctx)
 
@@ -194,12 +185,11 @@ describe('path and eval approval workflow', () => {
   })
 
   test('reviews only the write path, not its content', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
     let state: unknown
-    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, start, toolCall } = registerExtension()
     await start({}, ctx)
 
@@ -221,7 +211,7 @@ describe('path and eval approval workflow', () => {
   })
 
   test('skips URI targets even when the API is unavailable', async () => {
-    delete process.env.TYPESAFE_API_KEY
+    vi.stubEnv('TYPESAFE_API_KEY', undefined)
     const { ctx, start, toolCall } = registerExtension()
     await start({}, ctx)
 
@@ -243,12 +233,11 @@ describe('path and eval approval workflow', () => {
   })
 
   test('reviews every local edit target including a rename destination, but not protocol targets', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
     let state: unknown
-    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, start, toolCall } = registerExtension()
     await start({}, ctx)
 
@@ -273,12 +262,11 @@ describe('path and eval approval workflow', () => {
   })
 
   test('reviews apply-patch source and destination paths', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
     let state: unknown
-    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, start, toolCall } = registerExtension()
     await start({}, ctx)
 
@@ -301,12 +289,11 @@ describe('path and eval approval workflow', () => {
   })
 
   test('reviews the destination of structured edits', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
     let state: unknown
-    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, start, toolCall } = registerExtension()
     await start({}, ctx)
 
@@ -326,7 +313,6 @@ describe('path and eval approval workflow', () => {
   })
 
   test('prompts rather than approving an edit with unknown targets', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
     const { ctx, start, toolCall } = registerExtension()
     await start({}, ctx)
 
@@ -339,12 +325,11 @@ describe('path and eval approval workflow', () => {
   })
 
   test('reviews eval code and language even when code mentions a protocol', async () => {
-    process.env.TYPESAFE_API_KEY = 'test-key'
     let state: unknown
-    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
-    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    })
     const { ctx, start, toolCall } = registerExtension()
     await start({}, ctx)
 

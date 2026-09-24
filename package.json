@@ -36,7 +36,8 @@
     "lint": "oxlint",
     "fmt": "oxfmt",
     "typecheck": "tsc --noEmit",
-    "check": "bun lint && bun fmt --check && bun typecheck && bun test",
+    "test": "vitest run",
+    "check": "bun lint && bun fmt --check && bun typecheck && bun run test",
     "update-actions": "actionspack update",
     "release": "bumpp --commit \"Release v%s\""
   },
@@ -51,7 +52,8 @@
     "oxfmt": "^0.68.0",
     "oxlint": "^1.83.0",
     "oxlint-tsgolint": "^7.0.2002",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
   },
   "engines": {
     "bun": ">=1.4.0"
