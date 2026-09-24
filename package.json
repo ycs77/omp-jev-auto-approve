@@ -41,11 +41,8 @@
     "update-actions": "actionspack update",
     "release": "bumpp --commit \"Release v%s\""
   },
-  "dependencies": {
-    "@typesafe-ai/sdk": "^0.6.0"
-  },
   "devDependencies": {
-    "@oh-my-pi/pi-coding-agent": "^18.0.0",
+    "@oh-my-pi/pi-coding-agent": "^18.2.7",
     "@types/bun": "^1.4.2",
     "actionspack": "^0.1.5",
     "bumpp": "^12.3.0",

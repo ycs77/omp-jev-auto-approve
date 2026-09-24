@@ -1,5 +1,6 @@
 import type { BashToolInput, ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
-import { choice, TypeSafeClient } from '@typesafe-ai/sdk'
+import { findScopedSettings } from '@oh-my-pi/pi-coding-agent/config/settings'
+import { resolveJudge } from '@oh-my-pi/pi-coding-agent/judgment'
 
 type Safety = 'safe' | 'dangerous' | 'uncertain'
 
@@ -16,6 +17,10 @@ interface Decision {
 }
 
 const SAFE_CONFIDENCE_THRESHOLD = 0.9
+
+function isJevModel(model: { api: string; provider: string; id: string }): boolean {
+  return model.api === 'typesafe' && model.provider === 'typesafe' && /^jev(?:-|$)/.test(model.id)
+}
 
 function isBashToolInput(input: unknown): input is BashToolInput {
   return (
@@ -134,24 +139,6 @@ async function enforce(
 }
 
 export default function (pi: ExtensionAPI) {
-  let client: TypeSafeClient | null = null
-
-  pi.on('session_start', (_event, ctx) => {
-    client = null
-
-    if (!process.env.TYPESAFE_API_KEY?.trim()) {
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          '[omp-jev-auto-approve] Missing TYPESAFE_API_KEY, please visit https://console.typesafe.ai/keys to create and set it.',
-          'error',
-        )
-      }
-      return
-    }
-
-    client = new TypeSafeClient()
-  })
-
   pi.on('tool_call', async (event, ctx) => {
     const tool = event.toolName
     if (!['bash', 'read', 'write', 'edit', 'eval'].includes(tool)) return
@@ -239,22 +226,43 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (!client) {
-      return enforce(
-        tool,
-        { approval: 'prompt', reason: 'safety check unavailable' },
-        ctx,
-        event.toolCallId,
-        pi.events,
-      )
+    const settings = findScopedSettings(ctx.cwd)
+    const model = ctx.models.resolve('@judge')
+    if (!settings || !model) {
+      if (ctx.hasUI)
+        ctx.ui.notify(
+          '[omp-jev-auto-approve] Safety check unavailable; using OMP approval settings.',
+          'warning',
+        )
+      return
+    }
+    if (!isJevModel(model)) {
+      if (ctx.hasUI)
+        ctx.ui.notify(
+          '[omp-jev-auto-approve] Unsupported judge model; using OMP approval settings.',
+          'warning',
+        )
+      return
     }
     try {
-      const response = await client.systemOne({
+      const response = await resolveJudge({
+        settings,
+        registry: ctx.modelRegistry,
+        sessionId: ctx.sessionManager.getSessionId(),
+      }).judge({
         state,
         questions: {
-          operation_safety: choice(question, criteria),
+          operation_safety: { type: 'choice', instructions: question, criteria },
         },
       })
+      if (!isJevModel({ api: response.api, provider: response.provider, id: response.model })) {
+        if (ctx.hasUI)
+          ctx.ui.notify(
+            '[omp-jev-auto-approve] Unsupported judge model; using OMP approval settings.',
+            'warning',
+          )
+        return
+      }
       const assessment = response.answers.operation_safety
 
       if (

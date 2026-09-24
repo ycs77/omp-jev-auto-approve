@@ -13,18 +13,14 @@ Install the extension for OMP:
 omp install omp-jev-auto-approve
 ```
 
-Create an API key in the [TypeSafe Console](https://console.typesafe.ai/keys), then add it to your shell startup file, such as `~/.bashrc` or `~/.zshrc`, before starting OMP:
-
-```bash
-# TypeSafe AI
-export TYPESAFE_API_KEY="your-api-key"
-```
+Create an API key in the [TypeSafe Console](https://console.typesafe.ai/keys), then configure it in OMP with `/login typesafe`.
 
 ## Approval policy
 
 - `bash`: review the command and working directory.
 - `read` / `write` / `edit`: review local paths only, not file contents or patches. Protocol targets such as `xd://` and `skill://` are skipped.
 - `eval`: review the language, code, and working directory. Code is sent to TypeSafe; do not include secrets.
+- `safe` assessments with confidence at least `0.9` are auto-approved; `dangerous` assessments are denied. `uncertain` or lower-confidence results require manual approval.
 
 ## Sponsor
 

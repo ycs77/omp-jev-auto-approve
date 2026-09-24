@@ -1,14 +1,24 @@
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import extension from './index.js'
 
-const { mockSystemOne } = vi.hoisted(() => ({ mockSystemOne: vi.fn() }))
+const { mockJudge, mockFindScopedSettings } = vi.hoisted(() => ({
+  mockJudge: vi.fn(),
+  mockFindScopedSettings: vi.fn(() => ({}) as never),
+}))
 
-vi.mock('@typesafe-ai/sdk', async importOriginal => ({
-  ...(await importOriginal()),
-  TypeSafeClient: class {
-    systemOne = mockSystemOne
-  },
+vi.mock('@oh-my-pi/pi-coding-agent/config/settings', () => ({
+  findScopedSettings: mockFindScopedSettings,
+}))
+vi.mock('@oh-my-pi/pi-coding-agent/judgment', () => ({
+  resolveJudge: () => ({
+    judge: async (request: unknown) => ({
+      api: 'typesafe',
+      provider: 'typesafe',
+      model: 'jev-1.13.0',
+      ...(await mockJudge(request)),
+    }),
+  }),
 }))
 
 function registerExtension() {
@@ -22,6 +32,8 @@ function registerExtension() {
   } as unknown as ExtensionAPI
   const ctx = {
     cwd: '/project',
+    models: { resolve: vi.fn(() => ({ api: 'typesafe', provider: 'typesafe', id: 'jev-latest' })) },
+    modelRegistry: {},
     hasUI: true,
     sessionManager: { getSessionId: () => 'session' },
     ui: {
@@ -38,34 +50,28 @@ function registerExtension() {
 
   return {
     notifications,
-    start: handlers.session_start!,
     toolCall: handlers.tool_call!,
     ctx,
   }
 }
 
-beforeEach(() => {
-  vi.stubEnv('TYPESAFE_API_KEY', 'test-key')
-})
-
 afterEach(() => {
-  mockSystemOne.mockReset()
-  vi.unstubAllEnvs()
+  mockJudge.mockReset()
+  mockFindScopedSettings.mockReset()
+  mockFindScopedSettings.mockReturnValue({} as never)
 })
 
 describe('bash tool approval workflow', () => {
   test('delegates every valid Bash command to Jev', async () => {
     let requestedCommand: string | undefined
-    mockSystemOne.mockImplementation(async (request: { state: { command: string } }) => {
+    mockJudge.mockImplementation(async (request: { state: { command: string } }) => {
       requestedCommand = request.state.command
 
       return {
         answers: { operation_safety: { choice: 'dangerous', confidence: 1 } },
       }
     })
-    const { ctx, notifications, start, toolCall } = registerExtension()
-
-    await start({}, ctx)
+    const { ctx, notifications, toolCall } = registerExtension()
 
     const result = await toolCall(
       { toolName: 'bash', toolCallId: 'call', input: { command: 'rm -rf build' } },
@@ -84,12 +90,10 @@ describe('bash tool approval workflow', () => {
   })
 
   test('does not notify for a high-confidence safe assessment', async () => {
-    mockSystemOne.mockResolvedValue({
+    mockJudge.mockResolvedValue({
       answers: { operation_safety: { choice: 'safe', confidence: 0.9 } },
     })
-    const { ctx, notifications, start, toolCall } = registerExtension()
-
-    await start({}, ctx)
+    const { ctx, notifications, toolCall } = registerExtension()
 
     const result = await toolCall(
       { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
@@ -100,32 +104,30 @@ describe('bash tool approval workflow', () => {
     expect(notifications).toEqual([])
   })
 
-  test('resets a previous client when a new session lacks an API key', async () => {
-    mockSystemOne.mockRejectedValue(new Error('stale client was used'))
-    const { ctx, start, toolCall } = registerExtension()
-
-    await start({}, ctx)
-    vi.stubEnv('TYPESAFE_API_KEY', undefined)
-    await start({}, ctx)
+  test('returns to OMP approval when judge settings are unavailable', async () => {
+    const { ctx, notifications, toolCall } = registerExtension()
+    mockFindScopedSettings.mockReturnValueOnce(undefined as never)
 
     const result = await toolCall(
       { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
       ctx,
     )
 
-    expect(result).toEqual({
-      block: true,
-      reason: 'Permission denied: safety check unavailable.',
-    })
+    expect(result).toBeUndefined()
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(notifications).toEqual([
+      {
+        message: '[omp-jev-auto-approve] Safety check unavailable; using OMP approval settings.',
+        level: 'warning',
+      },
+    ])
   })
 
   test('prompts rather than auto-approving a low-confidence safe assessment', async () => {
-    mockSystemOne.mockResolvedValue({
+    mockJudge.mockResolvedValue({
       answers: { operation_safety: { choice: 'safe', confidence: 0.89 } },
     })
-    const { ctx, notifications, start, toolCall } = registerExtension()
-
-    await start({}, ctx)
+    const { ctx, notifications, toolCall } = registerExtension()
 
     const result = await toolCall(
       { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
@@ -142,11 +144,9 @@ describe('bash tool approval workflow', () => {
     })
   })
 
-  test('prompts when the TypeSafe API fails', async () => {
-    mockSystemOne.mockRejectedValue(new Error('service unavailable'))
-    const { ctx, notifications, start, toolCall } = registerExtension()
-
-    await start({}, ctx)
+  test('prompts when the judge request fails', async () => {
+    mockJudge.mockRejectedValue(new Error('service unavailable'))
+    const { ctx, notifications, toolCall } = registerExtension()
 
     const result = await toolCall(
       { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
@@ -162,17 +162,73 @@ describe('bash tool approval workflow', () => {
       level: 'error',
     })
   })
+
+  test('non-Jev judge role returns to OMP approval without calling a model', async () => {
+    const { ctx, notifications, toolCall } = registerExtension()
+    ctx.models.resolve = vi.fn(() => ({
+      api: 'openai-completions',
+      provider: 'openai',
+      id: 'gpt-4o',
+    })) as never
+
+    const result = await toolCall(
+      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
+      ctx,
+    )
+
+    expect(result).toBeUndefined()
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(notifications).toEqual([
+      {
+        message: '[omp-jev-auto-approve] Unsupported judge model; using OMP approval settings.',
+        level: 'warning',
+      },
+    ])
+  })
+
+  test('non-Jev fallback returns to OMP approval even for a high-confidence safe answer', async () => {
+    mockJudge.mockResolvedValue({
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4o',
+      answers: { operation_safety: { choice: 'safe', confidence: 1 } },
+    })
+    const { ctx, notifications, toolCall } = registerExtension()
+    const result = await toolCall(
+      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
+      ctx,
+    )
+    expect(mockJudge).toHaveBeenCalledOnce()
+    expect(result).toBeUndefined()
+    expect(notifications).toEqual([
+      {
+        message: '[omp-jev-auto-approve] Unsupported judge model; using OMP approval settings.',
+        level: 'warning',
+      },
+    ])
+  })
+
+  test('unavailable judge returns to OMP approval without a UI or warning', async () => {
+    const { ctx, notifications, toolCall } = registerExtension()
+    ctx.models.resolve = vi.fn(() => undefined)
+    const result = await toolCall(
+      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
+      { ...ctx, hasUI: false } as ExtensionContext,
+    )
+    expect(result).toBeUndefined()
+    expect(mockJudge).not.toHaveBeenCalled()
+    expect(notifications).toEqual([])
+  })
 })
 
 describe('path and eval approval workflow', () => {
   test('reviews a read path without reading file contents', async () => {
     let state: unknown
-    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
+    mockJudge.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
     })
-    const { ctx, start, toolCall } = registerExtension()
-    await start({}, ctx)
+    const { ctx, toolCall } = registerExtension()
 
     expect(
       await toolCall({ toolName: 'read', toolCallId: 'read', input: { path: '.env' } }, ctx),
@@ -186,12 +242,11 @@ describe('path and eval approval workflow', () => {
 
   test('reviews only the write path, not its content', async () => {
     let state: unknown
-    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
+    mockJudge.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
     })
-    const { ctx, start, toolCall } = registerExtension()
-    await start({}, ctx)
+    const { ctx, toolCall } = registerExtension()
 
     expect(
       await toolCall(
@@ -210,11 +265,9 @@ describe('path and eval approval workflow', () => {
     })
   })
 
-  test('skips URI targets even when the API is unavailable', async () => {
-    vi.stubEnv('TYPESAFE_API_KEY', undefined)
-    const { ctx, start, toolCall } = registerExtension()
-    await start({}, ctx)
-
+  test('skips URI targets without a judge role', async () => {
+    const { ctx, toolCall } = registerExtension()
+    mockFindScopedSettings.mockReturnValue(undefined as never)
     for (const toolName of ['read', 'write', 'edit']) {
       expect(
         await toolCall(
@@ -234,12 +287,11 @@ describe('path and eval approval workflow', () => {
 
   test('reviews every local edit target including a rename destination, but not protocol targets', async () => {
     let state: unknown
-    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
+    mockJudge.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
     })
-    const { ctx, start, toolCall } = registerExtension()
-    await start({}, ctx)
+    const { ctx, toolCall } = registerExtension()
 
     expect(
       await toolCall(
@@ -263,12 +315,11 @@ describe('path and eval approval workflow', () => {
 
   test('reviews apply-patch source and destination paths', async () => {
     let state: unknown
-    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
+    mockJudge.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
     })
-    const { ctx, start, toolCall } = registerExtension()
-    await start({}, ctx)
+    const { ctx, toolCall } = registerExtension()
 
     await toolCall(
       {
@@ -290,12 +341,11 @@ describe('path and eval approval workflow', () => {
 
   test('reviews the destination of structured edits', async () => {
     let state: unknown
-    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
+    mockJudge.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
     })
-    const { ctx, start, toolCall } = registerExtension()
-    await start({}, ctx)
+    const { ctx, toolCall } = registerExtension()
 
     await toolCall(
       {
@@ -313,8 +363,7 @@ describe('path and eval approval workflow', () => {
   })
 
   test('prompts rather than approving an edit with unknown targets', async () => {
-    const { ctx, start, toolCall } = registerExtension()
-    await start({}, ctx)
+    const { ctx, toolCall } = registerExtension()
 
     expect(
       await toolCall(
@@ -326,12 +375,11 @@ describe('path and eval approval workflow', () => {
 
   test('reviews eval code and language even when code mentions a protocol', async () => {
     let state: unknown
-    mockSystemOne.mockImplementation(async (request: { state: unknown }) => {
+    mockJudge.mockImplementation(async (request: { state: unknown }) => {
       state = request.state
       return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
     })
-    const { ctx, start, toolCall } = registerExtension()
-    await start({}, ctx)
+    const { ctx, toolCall } = registerExtension()
 
     expect(
       await toolCall(
