@@ -1,10 +1,10 @@
 import type { BashToolInput, ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
 import { choice, TypeSafeClient } from '@typesafe-ai/sdk'
 
-type CommandSafety = 'safe' | 'dangerous' | 'uncertain'
+type Safety = 'safe' | 'dangerous' | 'uncertain'
 
-interface CommandSafetyAssessment {
-  choice: CommandSafety
+interface SafetyAssessment {
+  choice: Safety
   confidence: number
 }
 
@@ -26,10 +26,55 @@ function isBashToolInput(input: unknown): input is BashToolInput {
   )
 }
 
-function decisionFromSafety(result: CommandSafetyAssessment): Decision {
+function isProtocolPath(path: string): boolean {
+  const match = /^([a-z][a-z0-9+.-]*):(?:(\/\/)|(.+))$/i.exec(path)
+  if (!match) return false
+  if (match[2]) return true
+  // Avoid treating read selectors such as Makefile:12 and README:raw:1-20 as URIs.
+  if (match[1].includes('.')) return false
+  const selector = /^(?:raw|conflicts|-?\d+(?:[-+]\d+)?(?:,\d+(?:[-+]\d+)?)*)$/i
+  return !match[3].split(':').every(part => selector.test(part))
+}
+
+function editTargets(input: Record<string, unknown>): string[] | null {
+  if (typeof input.input === 'string') {
+    const targets: string[] = []
+    for (const line of input.input.split(/\r?\n/)) {
+      const target =
+        /^\[(.+)#[0-9a-f]{4}\]$/i.exec(line)?.[1] ??
+        /^\*\*\* (?:Add|Update|Delete) File: (.+)$/.exec(line)?.[1] ??
+        /^\*\*\* Move to: (.+)$/.exec(line)?.[1] ??
+        /^MV (.+)$/.exec(line)?.[1]
+      if (target) {
+        const quoted = /^(['"])(.*)\1$/.exec(target)
+        targets.push(quoted ? quoted[2] : target)
+      }
+    }
+    return targets.length ? targets : null
+  }
+
+  if (typeof input.path !== 'string' || !input.path) return null
+  const targets = [input.path]
+  if (input.edits !== undefined) {
+    if (!Array.isArray(input.edits)) return null
+    for (const edit of input.edits) {
+      if (typeof edit !== 'object' || edit === null || Array.isArray(edit)) return null
+      if ('rename' in edit) {
+        if (typeof edit.rename !== 'string' || !edit.rename) return null
+        targets.push(edit.rename)
+      }
+    }
+  }
+  return targets
+}
+
+function decisionFromSafety(result: SafetyAssessment, tool: string): Decision {
   switch (result.choice) {
     case 'dangerous':
-      return { approval: 'deny', reason: 'unsafe command' }
+      return {
+        approval: 'deny',
+        reason: tool === 'bash' ? 'unsafe command' : 'unsafe tool call',
+      }
 
     case 'safe':
       return result.confidence >= SAFE_CONFIDENCE_THRESHOLD
@@ -108,21 +153,91 @@ export default function (pi: ExtensionAPI) {
   })
 
   pi.on('tool_call', async (event, ctx) => {
-    if (event.toolName !== 'bash') return
+    const tool = event.toolName
+    if (!['bash', 'read', 'write', 'edit', 'eval'].includes(tool)) return
 
-    if (!isBashToolInput(event.input)) {
+    const input = event.input as Record<string, unknown>
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) {
       return enforce(
-        event.toolName,
-        { approval: 'deny', reason: 'invalid bash tool input' },
+        tool,
+        { approval: 'deny', reason: `invalid ${tool} tool input` },
         ctx,
         event.toolCallId,
         pi.events,
       )
     }
 
-    const tool = event.toolName
-    const input = event.input
-    const workingDirectory = input.cwd ?? ctx.cwd
+    let state: Record<string, string | string[]>
+    let question: string
+    let criteria: { safe: string; dangerous: string; uncertain: string }
+
+    if (tool === 'bash') {
+      if (!isBashToolInput(input)) {
+        return enforce(
+          tool,
+          { approval: 'deny', reason: 'invalid bash tool input' },
+          ctx,
+          event.toolCallId,
+          pi.events,
+        )
+      }
+      state = { command: input.command, working_directory: input.cwd ?? ctx.cwd }
+      question = 'Using `command` and `working_directory`, determine the command safety level.'
+      criteria = {
+        safe: 'The command is read-only or has no meaningful destructive, privilege, credential, or external side-effect risk.',
+        dangerous:
+          'The command may cause data loss, destructive changes, privilege escalation, credential exposure, or harmful external effects.',
+        uncertain:
+          'The available command and working-directory context is insufficient to determine safety.',
+      }
+    } else if (tool === 'eval') {
+      if ((input.language !== 'py' && input.language !== 'js') || typeof input.code !== 'string') {
+        return enforce(
+          tool,
+          { approval: 'deny', reason: 'invalid eval tool input' },
+          ctx,
+          event.toolCallId,
+          pi.events,
+        )
+      }
+      state = { language: input.language, code: input.code, working_directory: ctx.cwd }
+      question =
+        'Using `language`, `code`, and `working_directory`, assess the risks of executing this code. The kernel may retain state from earlier calls.'
+      criteria = {
+        safe: 'The code has no meaningful destructive, privilege, credential, or external side-effect risk.',
+        dangerous:
+          'The code may cause data loss, destructive changes, privilege escalation, credential exposure, or harmful external effects.',
+        uncertain: 'The code or available execution context is insufficient to determine safety.',
+      }
+    } else {
+      const targets =
+        tool === 'edit'
+          ? editTargets(input)
+          : typeof input.path === 'string' && input.path
+            ? [input.path]
+            : null
+      if (!targets) {
+        return enforce(
+          tool,
+          { approval: 'prompt', reason: 'file targets unavailable' },
+          ctx,
+          event.toolCallId,
+          pi.events,
+        )
+      }
+      const paths = targets.filter(target => !isProtocolPath(target))
+      if (paths.length === 0) return
+      state = { operation: tool, paths, working_directory: ctx.cwd }
+      question =
+        'Using `operation`, every path in `paths`, and `working_directory`, assess whether access to these paths should be automatically allowed. File contents are not available; judge path access only.'
+      criteria = {
+        safe: 'Access to all listed paths for this operation is appropriate; none appear sensitive or restricted.',
+        dangerous:
+          'Access to at least one listed path for this operation should be blocked, such as a credential, private key, or sensitive configuration path.',
+        uncertain:
+          'The paths and working directory do not establish whether access should be allowed.',
+      }
+    }
 
     if (!client) {
       return enforce(
@@ -133,39 +248,26 @@ export default function (pi: ExtensionAPI) {
         pi.events,
       )
     }
-
     try {
       const response = await client.systemOne({
-        state: {
-          command: input.command,
-          working_directory: workingDirectory,
-        },
+        state,
         questions: {
-          command_safety: choice(
-            'Using `command` and `working_directory`, determine the command safety level.',
-            {
-              safe: 'The command is read-only or has no meaningful destructive, privilege, credential, or external side-effect risk.',
-              dangerous:
-                'The command may cause data loss, destructive changes, privilege escalation, credential exposure, or harmful external effects.',
-              uncertain:
-                'The available command and working-directory context is insufficient to determine safety.',
-            },
-          ),
+          operation_safety: choice(question, criteria),
         },
       })
-      const commandSafety = response.answers.command_safety
+      const assessment = response.answers.operation_safety
 
       if (
         ctx.hasUI &&
-        (commandSafety.choice !== 'safe' || commandSafety.confidence < SAFE_CONFIDENCE_THRESHOLD)
+        (assessment.choice !== 'safe' || assessment.confidence < SAFE_CONFIDENCE_THRESHOLD)
       ) {
         ctx.ui.notify(
-          `[omp-jev-auto-approve] ${commandSafety.choice}, confidence=${commandSafety.confidence.toFixed(2)}`,
+          `[omp-jev-auto-approve] ${assessment.choice}, confidence=${assessment.confidence.toFixed(2)}`,
           'warning',
         )
       }
 
-      return enforce(tool, decisionFromSafety(commandSafety), ctx, event.toolCallId, pi.events)
+      return enforce(tool, decisionFromSafety(assessment, tool), ctx, event.toolCallId, pi.events)
     } catch {
       if (ctx.hasUI) {
         ctx.ui.notify('[omp-jev-auto-approve] Safety check failed; approval required.', 'error')

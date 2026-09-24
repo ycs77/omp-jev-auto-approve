@@ -1,9 +1,9 @@
 # OMP Jev Auto Approve
 
-An [Oh My Pi (OMP)](https://omp.sh/) extension that uses [TypeSafe's Jev](https://typesafe.ai/) model to review and automatically approve tool calls before they run.
+An [Oh My Pi (OMP)](https://omp.sh/) extension that uses [TypeSafe's Jev](https://typesafe.ai/) to review Bash commands, eval code, and local file paths before tool calls run. It automatically approves high-confidence safe calls and routes uncertain calls to you.
 
 > [!WARNING]
-> This extension relies on an external AI model to assess Bash commands. Its assessments may be incorrect, incomplete, or unavailable, and an automatic approval does not guarantee that a command is safe. You are solely responsible for reviewing its use in your environment and accepting any consequences of approved commands being executed.
+> Jev assessments may be incorrect, incomplete, or unavailable. Automatic approval does not guarantee safety. `read`, `write`, and `edit` are reviewed by path only: file contents and edits are not inspected. Protocol paths (such as `xd://` and `skill://`) bypass path review, and Bash or eval code can access files indirectly. Review the risks before using this extension.
 
 ## Installation
 
@@ -19,6 +19,12 @@ Create an API key in the [TypeSafe Console](https://console.typesafe.ai/keys), t
 # TypeSafe AI
 export TYPESAFE_API_KEY="your-api-key"
 ```
+
+## Approval policy
+
+- `bash`: review the command and working directory.
+- `read` / `write` / `edit`: review local paths only, not file contents or patches. Protocol targets such as `xd://` and `skill://` are skipped.
+- `eval`: review the language, code, and working directory. Code is sent to TypeSafe; do not include secrets.
 
 ## Sponsor
 

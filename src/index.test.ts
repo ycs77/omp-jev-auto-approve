@@ -60,7 +60,7 @@ describe('bash tool approval workflow', () => {
       requestedCommand = request.state.command
 
       return {
-        answers: { command_safety: { choice: 'dangerous', confidence: 1 } },
+        answers: { operation_safety: { choice: 'dangerous', confidence: 1 } },
       }
     }) as unknown as typeof TypeSafeClient.prototype.systemOne
     const { ctx, notifications, start, toolCall } = registerExtension()
@@ -86,7 +86,7 @@ describe('bash tool approval workflow', () => {
   test('does not notify for a high-confidence safe assessment', async () => {
     process.env.TYPESAFE_API_KEY = 'test-key'
     TypeSafeClient.prototype.systemOne = (async () => ({
-      answers: { command_safety: { choice: 'safe', confidence: 0.9 } },
+      answers: { operation_safety: { choice: 'safe', confidence: 0.9 } },
     })) as unknown as typeof TypeSafeClient.prototype.systemOne
     const { ctx, notifications, start, toolCall } = registerExtension()
 
@@ -126,7 +126,7 @@ describe('bash tool approval workflow', () => {
   test('prompts rather than auto-approving a low-confidence safe assessment', async () => {
     process.env.TYPESAFE_API_KEY = 'test-key'
     TypeSafeClient.prototype.systemOne = (async () => ({
-      answers: { command_safety: { choice: 'safe', confidence: 0.89 } },
+      answers: { operation_safety: { choice: 'safe', confidence: 0.89 } },
     })) as unknown as typeof TypeSafeClient.prototype.systemOne
     const { ctx, notifications, start, toolCall } = registerExtension()
 
@@ -168,6 +168,200 @@ describe('bash tool approval workflow', () => {
     expect(notifications).toContainEqual({
       message: '[omp-jev-auto-approve] Safety check failed; approval required.',
       level: 'error',
+    })
+  })
+})
+
+describe('path and eval approval workflow', () => {
+  test('reviews a read path without reading file contents', async () => {
+    process.env.TYPESAFE_API_KEY = 'test-key'
+    let state: unknown
+    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+      state = request.state
+      return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
+    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    const { ctx, start, toolCall } = registerExtension()
+    await start({}, ctx)
+
+    expect(
+      await toolCall({ toolName: 'read', toolCallId: 'read', input: { path: '.env' } }, ctx),
+    ).toEqual({ block: true, reason: 'Permission denied: unsafe tool call.' })
+    expect(state).toEqual({
+      operation: 'read',
+      paths: ['.env'],
+      working_directory: '/project',
+    })
+  })
+
+  test('reviews only the write path, not its content', async () => {
+    process.env.TYPESAFE_API_KEY = 'test-key'
+    let state: unknown
+    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+      state = request.state
+      return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
+    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    const { ctx, start, toolCall } = registerExtension()
+    await start({}, ctx)
+
+    expect(
+      await toolCall(
+        {
+          toolName: 'write',
+          toolCallId: 'write',
+          input: { path: 'notes.txt', content: 'private data' },
+        },
+        ctx,
+      ),
+    ).toBeUndefined()
+    expect(state).toEqual({
+      operation: 'write',
+      paths: ['notes.txt'],
+      working_directory: '/project',
+    })
+  })
+
+  test('skips URI targets even when the API is unavailable', async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const { ctx, start, toolCall } = registerExtension()
+    await start({}, ctx)
+
+    for (const toolName of ['read', 'write', 'edit']) {
+      expect(
+        await toolCall(
+          {
+            toolName,
+            toolCallId: toolName,
+            input:
+              toolName === 'edit'
+                ? { input: '*** Begin Patch\n["xd://debug"#ABCD]\nREM\n*** End Patch\n' }
+                : { path: 'skill://typesafe-ai', content: 'ignored' },
+          },
+          ctx,
+        ),
+      ).toBeUndefined()
+    }
+  })
+
+  test('reviews every local edit target including a rename destination, but not protocol targets', async () => {
+    process.env.TYPESAFE_API_KEY = 'test-key'
+    let state: unknown
+    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+      state = request.state
+      return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
+    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    const { ctx, start, toolCall } = registerExtension()
+    await start({}, ctx)
+
+    expect(
+      await toolCall(
+        {
+          toolName: 'edit',
+          toolCallId: 'edit',
+          input: {
+            input:
+              '*** Begin Patch\n[notes.txt#ABCD]\nMV .env\n[xd://debug#1234]\nREM\n*** End Patch\n',
+          },
+        },
+        ctx,
+      ),
+    ).toEqual({ block: true, reason: 'Permission denied: unsafe tool call.' })
+    expect(state).toEqual({
+      operation: 'edit',
+      paths: ['notes.txt', '.env'],
+      working_directory: '/project',
+    })
+  })
+
+  test('reviews apply-patch source and destination paths', async () => {
+    process.env.TYPESAFE_API_KEY = 'test-key'
+    let state: unknown
+    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+      state = request.state
+      return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
+    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    const { ctx, start, toolCall } = registerExtension()
+    await start({}, ctx)
+
+    await toolCall(
+      {
+        toolName: 'edit',
+        toolCallId: 'edit',
+        input: {
+          input:
+            '*** Begin Patch\n*** Update File: src/app.ts\n*** Move to: private/.env\n*** End Patch\n',
+        },
+      },
+      ctx,
+    )
+    expect(state).toEqual({
+      operation: 'edit',
+      paths: ['src/app.ts', 'private/.env'],
+      working_directory: '/project',
+    })
+  })
+
+  test('reviews the destination of structured edits', async () => {
+    process.env.TYPESAFE_API_KEY = 'test-key'
+    let state: unknown
+    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+      state = request.state
+      return { answers: { operation_safety: { choice: 'safe', confidence: 0.9 } } }
+    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    const { ctx, start, toolCall } = registerExtension()
+    await start({}, ctx)
+
+    await toolCall(
+      {
+        toolName: 'edit',
+        toolCallId: 'edit',
+        input: { path: 'old.txt', edits: [{ op: 'update', rename: 'new.txt' }] },
+      },
+      ctx,
+    )
+    expect(state).toEqual({
+      operation: 'edit',
+      paths: ['old.txt', 'new.txt'],
+      working_directory: '/project',
+    })
+  })
+
+  test('prompts rather than approving an edit with unknown targets', async () => {
+    process.env.TYPESAFE_API_KEY = 'test-key'
+    const { ctx, start, toolCall } = registerExtension()
+    await start({}, ctx)
+
+    expect(
+      await toolCall(
+        { toolName: 'edit', toolCallId: 'edit', input: { input: 'unknown patch syntax' } },
+        ctx,
+      ),
+    ).toEqual({ block: true, reason: 'Permission denied: file targets unavailable.' })
+  })
+
+  test('reviews eval code and language even when code mentions a protocol', async () => {
+    process.env.TYPESAFE_API_KEY = 'test-key'
+    let state: unknown
+    TypeSafeClient.prototype.systemOne = (async (request: { state: unknown }) => {
+      state = request.state
+      return { answers: { operation_safety: { choice: 'dangerous', confidence: 1 } } }
+    }) as unknown as typeof TypeSafeClient.prototype.systemOne
+    const { ctx, start, toolCall } = registerExtension()
+    await start({}, ctx)
+
+    expect(
+      await toolCall(
+        {
+          toolName: 'eval',
+          toolCallId: 'eval',
+          input: { language: 'js', code: 'await tool.read({path:"xd://debug"})' },
+        },
+        ctx,
+      ),
+    ).toEqual({ block: true, reason: 'Permission denied: unsafe tool call.' })
+    expect(state).toEqual({
+      language: 'js',
+      code: 'await tool.read({path:"xd://debug"})',
+      working_directory: '/project',
     })
   })
 })
