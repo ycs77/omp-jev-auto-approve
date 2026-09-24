@@ -307,8 +307,13 @@ export default function (pi: ExtensionAPI) {
         (assessment.choice !== 'safe' || assessment.confidence < SAFE_CONFIDENCE_THRESHOLD)
       ) {
         ctx.ui.notify(
-          `[omp-jev-auto-approve] ${assessment.choice}, confidence=${assessment.confidence.toFixed(2)}`,
+          `[omp-jev-auto-approve] ${assessment.choice}, confidence: ${Math.round(assessment.confidence * 100)}%`,
           'warning',
+        )
+      } else if (ctx.hasUI && process.env.OMP_JEV_AUTO_APPROVE_DEBUG === 'true') {
+        ctx.ui.notify(
+          `[omp-jev-auto-approve] ${assessment.choice}, confidence: ${Math.round(assessment.confidence * 100)}%`,
+          'info',
         )
       }
 

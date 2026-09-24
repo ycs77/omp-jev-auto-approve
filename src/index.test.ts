@@ -59,6 +59,7 @@ afterEach(() => {
   mockJudge.mockReset()
   mockFindScopedSettings.mockReset()
   mockFindScopedSettings.mockReturnValue({ get: () => [] } as never)
+  vi.unstubAllEnvs()
 })
 
 describe('bash tool approval workflow', () => {
@@ -84,7 +85,7 @@ describe('bash tool approval workflow', () => {
       reason: 'Permission denied: unsafe command.',
     })
     expect(notifications).toContainEqual({
-      message: '[omp-jev-auto-approve] dangerous, confidence=1.00',
+      message: '[omp-jev-auto-approve] dangerous, confidence: 100%',
       level: 'warning',
     })
   })
@@ -162,6 +163,27 @@ describe('bash tool approval workflow', () => {
     expect(notifications).toEqual([])
   })
 
+  test('shows safe assessments as info only when debug is true and UI is available', async () => {
+    mockJudge.mockResolvedValue({
+      answers: { operation_safety: { choice: 'safe', confidence: 0.95 } },
+    })
+    const { ctx, notifications, toolCall } = registerExtension()
+    const event = { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } }
+
+    vi.stubEnv('OMP_JEV_AUTO_APPROVE_DEBUG', 'false')
+    await toolCall(event, ctx)
+    expect(notifications).toEqual([])
+
+    vi.stubEnv('OMP_JEV_AUTO_APPROVE_DEBUG', 'true')
+    expect(await toolCall(event, ctx)).toBeUndefined()
+    expect(notifications).toEqual([
+      { message: '[omp-jev-auto-approve] safe, confidence: 95%', level: 'info' },
+    ])
+
+    await toolCall(event, { ...ctx, hasUI: false } as ExtensionContext)
+    expect(notifications).toHaveLength(1)
+  })
+
   test('returns to OMP approval when judge settings are unavailable', async () => {
     const { ctx, notifications, toolCall } = registerExtension()
     mockFindScopedSettings.mockReturnValueOnce(undefined as never)
@@ -197,7 +219,7 @@ describe('bash tool approval workflow', () => {
       reason: 'Permission denied: low confidence safety assessment.',
     })
     expect(notifications).toContainEqual({
-      message: '[omp-jev-auto-approve] safe, confidence=0.89',
+      message: '[omp-jev-auto-approve] safe, confidence: 89%',
       level: 'warning',
     })
   })
