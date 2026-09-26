@@ -22,7 +22,7 @@ interface Decision {
   reason?: string
 }
 
-const SAFE_CONFIDENCE_THRESHOLD = 0.9
+const SAFE_CONFIDENCE_THRESHOLD = 0.8
 
 function isBashToolInput(input: unknown): input is BashToolInput {
   return (

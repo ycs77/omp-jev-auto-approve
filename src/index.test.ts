@@ -241,7 +241,7 @@ describe('bash tool approval workflow', () => {
 
   test('prompts rather than auto-approving a low-confidence safe assessment', async () => {
     mockJudge.mockResolvedValue({
-      answers: { operation_safety: { choice: 'safe', confidence: 0.89 } },
+      answers: { operation_safety: { choice: 'safe', confidence: 0.79 } },
     })
     const { ctx, notifications, toolCall } = registerExtension()
 
@@ -255,7 +255,7 @@ describe('bash tool approval workflow', () => {
       reason: 'Permission denied: low confidence safety assessment.',
     })
     expect(notifications).toContainEqual({
-      message: '[omp-jev-auto-approve] safe, confidence: 89%',
+      message: '[omp-jev-auto-approve] safe, confidence: 79%',
       level: 'warning',
     })
   })
