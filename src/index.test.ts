@@ -4,11 +4,15 @@ import extension from './index.js'
 
 const { mockJudge, mockFindScopedSettings } = vi.hoisted(() => ({
   mockJudge: vi.fn(),
-  mockFindScopedSettings: vi.fn(() => ({ get: () => [] }) as never),
+  mockFindScopedSettings: vi.fn((): { patterns: unknown[] } | undefined => ({ patterns: [] })),
 }))
 
+vi.mock('@oh-my-pi/pi-coding-agent', () => ({ settings: {} }))
 vi.mock('@oh-my-pi/pi-coding-agent/config/settings', () => ({
   findScopedSettings: mockFindScopedSettings,
+}))
+vi.mock('@oh-my-pi/pi-coding-agent/exec/settings', () => ({
+  cfgBashPatterns: { get: () => mockFindScopedSettings()?.patterns ?? [] },
 }))
 vi.mock('@oh-my-pi/pi-coding-agent/judgment', () => ({
   resolveJudge: () => ({
@@ -33,7 +37,9 @@ function registerExtension() {
   const ctx = {
     cwd: '/project',
     models: { resolve: vi.fn(() => ({ api: 'typesafe', provider: 'typesafe', id: 'jev-latest' })) },
-    modelRegistry: {},
+    modelRegistry: {
+      getAvailable: () => [{ provider: 'typesafe', id: 'jev-latest' }],
+    },
     hasUI: true,
     sessionManager: { getSessionId: () => 'session' },
     ui: {
@@ -58,7 +64,7 @@ function registerExtension() {
 afterEach(() => {
   mockJudge.mockReset()
   mockFindScopedSettings.mockReset()
-  mockFindScopedSettings.mockReturnValue({ get: () => [] } as never)
+  mockFindScopedSettings.mockReturnValue({ patterns: [] } as never)
   vi.unstubAllEnvs()
 })
 
@@ -92,7 +98,7 @@ describe('bash tool approval workflow', () => {
 
   test('skips Jev for an exact Bash allow pattern', async () => {
     mockFindScopedSettings.mockReturnValue({
-      get: () => [{ match: 'git status', approval: 'allow' }],
+      patterns: [{ match: 'git status', approval: 'allow' }],
     } as never)
     const { ctx, notifications, toolCall } = registerExtension()
 
@@ -108,7 +114,7 @@ describe('bash tool approval workflow', () => {
 
   test('skips Jev for a matching wildcard allow even when other rules are restrictive', async () => {
     mockFindScopedSettings.mockReturnValue({
-      get: () => [
+      patterns: [
         { match: 'git status*', approval: 'deny' },
         { match: 'git * --short', approval: 'allow' },
       ],
@@ -124,9 +130,58 @@ describe('bash tool approval workflow', () => {
     expect(mockJudge).not.toHaveBeenCalled()
   })
 
+  test('only allow rules bypass Jev, without trimming or collapsing command whitespace', async () => {
+    mockFindScopedSettings.mockReturnValue({
+      patterns: [
+        { match: 'bun fmt', approval: 'prompt' },
+        { match: 'git status', approval: 'deny' },
+        { match: 'bun fmt*', approval: 'allow' },
+        { match: 'git  status', approval: 'allow' },
+      ],
+    } as never)
+    mockJudge.mockResolvedValue({
+      answers: { operation_safety: { choice: 'dangerous', confidence: 1 } },
+    })
+    const { ctx, toolCall } = registerExtension()
+
+    for (const command of ['git status', 'git status ', 'bun  fmt', ' bun fmt']) {
+      expect(
+        await toolCall({ toolName: 'bash', toolCallId: command, input: { command } }, ctx),
+      ).toEqual({ block: true, reason: 'Permission denied: unsafe command.' })
+    }
+    for (const command of ['bun fmt', 'bun fmt --check', 'git  status']) {
+      expect(
+        await toolCall({ toolName: 'bash', toolCallId: command, input: { command } }, ctx),
+      ).toBeUndefined()
+    }
+    expect(mockJudge).toHaveBeenCalledTimes(4)
+  })
+
+  test('treats only * as a wildcard and matches the whole command', async () => {
+    mockFindScopedSettings.mockReturnValue({
+      patterns: [{ match: 'echo a.b* done', approval: 'allow' }],
+    })
+    mockJudge.mockResolvedValue({
+      answers: { operation_safety: { choice: 'dangerous', confidence: 1 } },
+    })
+    const { ctx, toolCall } = registerExtension()
+
+    for (const command of ['echo a.b done', 'echo a.b more done']) {
+      expect(
+        await toolCall({ toolName: 'bash', toolCallId: command, input: { command } }, ctx),
+      ).toBeUndefined()
+    }
+    for (const command of ['echo axb done', 'before echo a.b done', 'echo a.b done after']) {
+      expect(
+        await toolCall({ toolName: 'bash', toolCallId: command, input: { command } }, ctx),
+      ).toEqual({ block: true, reason: 'Permission denied: unsafe command.' })
+    }
+    expect(mockJudge).toHaveBeenCalledTimes(3)
+  })
+
   test('keeps unmatched, restrictive, and regex-like rules on the Jev path', async () => {
     mockFindScopedSettings.mockReturnValue({
-      get: () => [
+      patterns: [
         { match: 'git status', approval: 'prompt' },
         { match: 'git log', approval: 'deny' },
         { match: 'git show a.b', approval: 'allow' },
@@ -184,25 +239,6 @@ describe('bash tool approval workflow', () => {
     expect(notifications).toHaveLength(1)
   })
 
-  test('returns to OMP approval when judge settings are unavailable', async () => {
-    const { ctx, notifications, toolCall } = registerExtension()
-    mockFindScopedSettings.mockReturnValueOnce(undefined as never)
-
-    const result = await toolCall(
-      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
-      ctx,
-    )
-
-    expect(result).toBeUndefined()
-    expect(mockJudge).not.toHaveBeenCalled()
-    expect(notifications).toEqual([
-      {
-        message: '[omp-jev-auto-approve] Safety check unavailable; using OMP approval settings.',
-        level: 'warning',
-      },
-    ])
-  })
-
   test('prompts rather than auto-approving a low-confidence safe assessment', async () => {
     mockJudge.mockResolvedValue({
       answers: { operation_safety: { choice: 'safe', confidence: 0.89 } },
@@ -243,54 +279,9 @@ describe('bash tool approval workflow', () => {
     })
   })
 
-  test('non-Jev judge role returns to OMP approval without calling a model', async () => {
-    const { ctx, notifications, toolCall } = registerExtension()
-    ctx.models.resolve = vi.fn(() => ({
-      api: 'openai-completions',
-      provider: 'openai',
-      id: 'gpt-4o',
-    })) as never
-
-    const result = await toolCall(
-      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
-      ctx,
-    )
-
-    expect(result).toBeUndefined()
-    expect(mockJudge).not.toHaveBeenCalled()
-    expect(notifications).toEqual([
-      {
-        message: '[omp-jev-auto-approve] Unsupported judge model; using OMP approval settings.',
-        level: 'warning',
-      },
-    ])
-  })
-
-  test('non-Jev fallback returns to OMP approval even for a high-confidence safe answer', async () => {
-    mockJudge.mockResolvedValue({
-      api: 'openai-completions',
-      provider: 'openai',
-      model: 'gpt-4o',
-      answers: { operation_safety: { choice: 'safe', confidence: 1 } },
-    })
-    const { ctx, notifications, toolCall } = registerExtension()
-    const result = await toolCall(
-      { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
-      ctx,
-    )
-    expect(mockJudge).toHaveBeenCalledOnce()
-    expect(result).toBeUndefined()
-    expect(notifications).toEqual([
-      {
-        message: '[omp-jev-auto-approve] Unsupported judge model; using OMP approval settings.',
-        level: 'warning',
-      },
-    ])
-  })
-
   test('unavailable judge returns to OMP approval without a UI or warning', async () => {
     const { ctx, notifications, toolCall } = registerExtension()
-    ctx.models.resolve = vi.fn(() => undefined)
+    ctx.modelRegistry.getAvailable = vi.fn(() => []) as never
     const result = await toolCall(
       { toolName: 'bash', toolCallId: 'call', input: { command: 'git status' } },
       { ...ctx, hasUI: false } as ExtensionContext,

@@ -1,5 +1,6 @@
 import type { BashToolInput, ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
-import { findScopedSettings } from '@oh-my-pi/pi-coding-agent/config/settings'
+import { settings } from '@oh-my-pi/pi-coding-agent'
+import { cfgBashPatterns } from '@oh-my-pi/pi-coding-agent/exec/settings'
 import { resolveJudge } from '@oh-my-pi/pi-coding-agent/judgment'
 
 type Safety = 'safe' | 'dangerous' | 'uncertain'
@@ -11,16 +12,17 @@ interface SafetyAssessment {
 
 type Approval = 'allow' | 'deny' | 'prompt'
 
+interface BashPatternRule {
+  match: string
+  approval: Approval
+}
+
 interface Decision {
   approval: Approval
   reason?: string
 }
 
 const SAFE_CONFIDENCE_THRESHOLD = 0.9
-
-function isJevModel(model: { api: string; provider: string; id: string }): boolean {
-  return model.api === 'typesafe' && model.provider === 'typesafe' && /^jev(?:-|$)/.test(model.id)
-}
 
 function isBashToolInput(input: unknown): input is BashToolInput {
   return (
@@ -97,36 +99,20 @@ function decisionFromSafety(result: SafetyAssessment, tool: string): Decision {
   }
 }
 
-function matchesAllowedBashPattern(command: string, patterns: unknown): boolean {
-  if (!Array.isArray(patterns)) return false
+function matchesAllowedBashPattern(command: string, patterns: BashPatternRule[]): boolean {
+  if (!Array.isArray(patterns) || !command) return false
 
-  const normalizedCommand = command.trim().replace(/\s+/gu, ' ')
-  if (!normalizedCommand) return false
+  const allowed = patterns.filter(rule => rule.approval === 'allow' && rule.match)
+  if (allowed.some(rule => rule.match === command)) return true
 
-  for (const rule of patterns as unknown[]) {
-    if (
-      typeof rule !== 'object' ||
-      rule === null ||
-      Array.isArray(rule) ||
-      !('match' in rule) ||
-      !('approval' in rule) ||
-      typeof rule.match !== 'string' ||
-      typeof rule.approval !== 'string' ||
-      rule.approval.trim().toLowerCase() !== 'allow'
-    ) {
-      continue
-    }
-
-    const match = rule.match.trim().replace(/\s+/gu, ' ')
-    if (!match) continue
-    if (match === normalizedCommand) return true
+  for (const { match } of allowed) {
     if (!match.includes('*')) continue
 
     const escaped = match
       .split('*')
       .map(part => part.replace(/[\\^$+?.()|[\]{}]/gu, '\\$&'))
       .join('.*')
-    if (new RegExp(`^${escaped}$`, 'u').test(normalizedCommand)) return true
+    if (new RegExp(`^${escaped}$`, 'u').test(command)) return true
   }
   return false
 }
@@ -188,8 +174,6 @@ export default function (pi: ExtensionAPI) {
       )
     }
 
-    const settings = findScopedSettings(ctx.cwd)
-
     let state: Record<string, string | string[]>
     let question: string
     let criteria: { safe: string; dangerous: string; uncertain: string }
@@ -204,7 +188,13 @@ export default function (pi: ExtensionAPI) {
           pi.events,
         )
       }
-      if (matchesAllowedBashPattern(input.command, settings?.get('bash.patterns'))) return
+      const allowedPatternMatch = matchesAllowedBashPattern(
+        input.command,
+        cfgBashPatterns.get(settings) as unknown as BashPatternRule[],
+      )
+      if (allowedPatternMatch) {
+        return
+      }
 
       state = { command: input.command, working_directory: input.cwd ?? ctx.cwd }
       question = 'Using `command` and `working_directory`, determine the command safety level.'
@@ -264,42 +254,28 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    const model = ctx.models.resolve('@judge')
-    if (!settings || !model) {
+    const model = ctx.modelRegistry
+      .getAvailable('judge')
+      .find(model => model.provider === 'typesafe' && model.id === 'jev-latest')
+
+    if (!model) {
       if (ctx.hasUI)
-        ctx.ui.notify(
-          '[omp-jev-auto-approve] Safety check unavailable; using OMP approval settings.',
-          'warning',
-        )
+        ctx.ui.notify('[omp-jev-auto-approve] TypeSafe AI model not available.', 'warning')
       return
     }
-    if (!isJevModel(model)) {
-      if (ctx.hasUI)
-        ctx.ui.notify(
-          '[omp-jev-auto-approve] Unsupported judge model; using OMP approval settings.',
-          'warning',
-        )
-      return
-    }
+
     try {
       const response = await resolveJudge({
         settings,
         registry: ctx.modelRegistry,
         sessionId: ctx.sessionManager.getSessionId(),
+        sessionModel: model,
       }).judge({
         state,
         questions: {
           operation_safety: { type: 'choice', instructions: question, criteria },
         },
       })
-      if (!isJevModel({ api: response.api, provider: response.provider, id: response.model })) {
-        if (ctx.hasUI)
-          ctx.ui.notify(
-            '[omp-jev-auto-approve] Unsupported judge model; using OMP approval settings.',
-            'warning',
-          )
-        return
-      }
       const assessment = response.answers.operation_safety
 
       if (
