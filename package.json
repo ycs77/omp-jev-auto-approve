@@ -1,6 +1,6 @@
 {
   "name": "omp-jev-auto-approve",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Jev-powered approval for OMP commands, code execution, and file access",
   "keywords": [
     "ai",
